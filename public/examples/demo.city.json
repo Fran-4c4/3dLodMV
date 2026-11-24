@@ -1,0 +1,36 @@
+{
+  "type": "CityJSON",
+  "version": "2.0",
+  "metadata": {
+    "referenceSystem": "https://www.opengis.net/def/crs/EPSG/0/25830",
+    "title": "3dLodMV local example"
+  },
+  "transform": {
+    "scale": [0.01, 0.01, 0.01],
+    "translate": [440000.0, 4470000.0, 650.0]
+  },
+  "vertices": [
+    [0,0,0],[2000,0,0],[2000,1600,0],[0,1600,0],
+    [0,0,1400],[2000,0,1400],[2000,1600,1400],[0,1600,1400],
+    [2800,200,0],[4300,200,0],[4300,1500,0],[2800,1500,0],
+    [2800,200,900],[4300,200,900],[4300,1500,900],[2800,1500,900]
+  ],
+  "CityObjects": {
+    "building-a": {
+      "type": "Building",
+      "attributes": {"name": "Civic center", "yearOfConstruction": 2018, "measuredHeight": 14, "issues": ["Synthetic QA example"], "building_surfaces": {"roof": 1, "wall": 4}},
+      "geometry": [{"type": "Solid", "lod": "1.2", "boundaries": [[
+        [[0,3,2,1,0]], [[4,5,6,7,4]], [[0,1,5,4,0]],
+        [[1,2,6,5,1]], [[2,3,7,6,2]], [[3,0,4,7,3]]
+      ]]}]
+    },
+    "building-b": {
+      "type": "Building",
+      "attributes": {"name": "Library", "usage": "public", "measuredHeight": 9},
+      "geometry": [{"type": "Solid", "lod": "1.2", "boundaries": [[
+        [[8,11,10,9,8]], [[12,13,14,15,12]], [[8,9,13,12,8]],
+        [[9,10,14,13,9]], [[10,11,15,14,10]], [[11,8,12,15,11]]
+      ]]}]
+    }
+  }
+}

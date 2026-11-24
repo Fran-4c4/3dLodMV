@@ -1,0 +1,32 @@
+{
+  "name": "3dlodmv",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Local-first geospatial CityJSON viewer built with iTowns and Three.js.",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 8012",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 8012",
+    "test": "vitest run",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "@types/toastify-js": "^1.12.4",
+    "earcut": "3.2.4",
+    "geotiff": "^3.0.5",
+    "itowns": "2.46.0",
+    "proj4": "2.23.0",
+    "three": "0.174.0",
+    "toastify-js": "^1.12.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6",
+    "@types/three": "0.174.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.8",
+    "vitest": "5.1.1"
+  }
+}
