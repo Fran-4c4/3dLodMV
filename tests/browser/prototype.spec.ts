@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import { writeArrayBuffer } from 'geotiff';
 
 test('uses a stable add-data dialog and exposes the analysis panels', async ({ page }) => {
+  test.slow();
   const errors: string[] = [];
   await page.route('https://tile.openstreetmap.org/**', route => route.abort());
   await page.route('https://gibs.earthdata.nasa.gov/**', route => route.fulfill({
@@ -10,7 +11,7 @@ test('uses a stable add-data dialog and exposes the analysis panels', async ({ p
   }));
   await page.route('https://xyz-mdt.idee.es/**', route => route.fulfill({
     status: 200, contentType: 'image/png',
-    body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+    body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg7OoAAAGjARTOqORWAAAAAElFTkSuQmCC', 'base64'),
   }));
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
@@ -121,7 +122,7 @@ test('uses a stable add-data dialog and exposes the analysis panels', async ({ p
     GTModelTypeGeoKey: 1, GTRasterTypeGeoKey: 1, ProjectedCSTypeGeoKey: 25830,
   });
   await page.locator('#terrain-file').setInputFiles({ name: 'synthetic-terrain.tif', mimeType: 'image/tiff', buffer: Buffer.from(terrainBuffer) });
-  await expect(page.locator('#terrain-count')).toHaveText('1');
+  await expect(page.getByRole('checkbox', { name: 'Show synthetic-terrain.tif' })).toBeChecked({ timeout: 45000 });
   await expect(page.locator('#terrain-layer-list')).toContainText('EPSG:25830');
   await expect(page.locator('.toastify').filter({ hasText: 'terrain added' }).last()).toBeVisible();
 
@@ -201,3 +202,41 @@ test('uses a stable add-data dialog and exposes the analysis panels', async ({ p
   expect(ordering.rasterTopToBottom).toEqual(ordering.display.filter((id: string) => id !== 'cityjson-model'));
   expect(errors).toEqual([]);
 });
+
+for (const terrainFirst of [true, false]) {
+  test(`drapes PNOA on IGN elevation when ${terrainFirst ? 'terrain' : 'imagery'} is added first`, async ({ page }) => {
+    test.setTimeout(120000);
+    await page.setViewportSize({ width: 880, height: 540 });
+    // RGB (1, 138, 136) encodes a known 100 m height in the IGN Terrain-RGB format.
+    const tile = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg7OoAAAGjARTOqORWAAAAAElFTkSuQmCC', 'base64');
+    for (const host of ['gibs.earthdata.nasa.gov', 'xyz-mdt.idee.es', 'www.ign.es']) {
+      await page.route(`https://${host}/**`, route => route.fulfill({ contentType: 'image/png', body: tile }));
+    }
+    await page.goto('/');
+    await expect(page.getByLabel('Show NASA Blue Marble')).toBeVisible();
+    await page.evaluate(async () => {
+      const { view } = (window as any).__3dLodMVDebug;
+      await view.controls.lookAtCoordinate({ coord: view.controls.getLookAtCoordinate(), range: 2500, tilt: 50 }, false);
+    });
+    await page.getByLabel('Show NASA Blue Marble').uncheck();
+    const names = [/IGN Spain Terrain/, /PNOA Latest Orthophoto/];
+    for (const name of terrainFirst ? names : names.reverse()) {
+      await page.locator('#open-data-left').click();
+      await page.getByRole('button', { name }).click();
+      await expect(page.getByRole('checkbox', { name })).toBeChecked();
+    }
+    await expect.poll(() => page.evaluate(() => {
+      const { view } = (window as any).__3dLodMVDebug;
+      const ortho = view.getLayers().find((l: any) => l.id.includes('ign-pnoa'));
+      let draped = false;
+      view.tileLayer.object3d.traverse((node: any) => {
+        if (!node.material?.visible || !ortho) return;
+        const material = node.material;
+        const elevation = material.getElevationTile?.();
+        if (material.getTile?.(ortho.id)?.textures.some((t: any) => t?.isTexture) &&
+            elevation?.textures.some((t: any) => t?.image?.data?.includes(100))) draped = true;
+      });
+      return draped;
+    }), { timeout: 55000 }).toBe(true);
+  });
+}

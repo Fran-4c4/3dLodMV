@@ -1,4 +1,4 @@
-import { Coordinates, GeometryLayer, Source, type GlobeView } from 'itowns';
+import { Coordinates, ElevationLayer, Extent, TMSSource, type GlobeView } from 'itowns';
 import * as THREE from 'three';
 import { fromArrayBuffer } from 'geotiff';
 import { registerCommonCrs } from '../scene/cityjson-layer';
@@ -27,7 +27,8 @@ export interface TerrainRecord {
   id: string;
   name: string;
   kind: 'remote' | 'local';
-  layer: GeometryLayer;
+  /** Native globe displacement. iTowns defines scale dynamically (1 = metres, 0 = hidden). */
+  layer: ElevationLayer & { scale: number };
   attribution?: { name: string; url?: string };
   sourceCrs?: string;
   elevationRange?: readonly [number, number];
@@ -69,24 +70,33 @@ export async function addTerrainPreset(view: GlobeView, preset: TerrainPreset, i
   const latitudeRadians = THREE.MathUtils.degToRad(latitude);
   const centreY = Math.floor((1 - Math.asinh(Math.tan(latitudeRadians)) / Math.PI) / 2 * tileCount);
   const centreEcef = new Coordinates('EPSG:4326', longitude, latitude, 0).as('EPSG:4978').toVector3();
-  const root = new THREE.Group(); root.name = `${preset.name} terrain patch`; root.position.copy(centreEcef);
-  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0, side: THREE.DoubleSide });
-  const box = new THREE.Box3(); const requests: Array<Promise<void>> = [];
-  for (let offsetY = -1; offsetY <= 1; offsetY += 1) for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
-    const tileX = centreX + offsetX; const tileY = centreY + offsetY;
-    if (tileX < 0 || tileY < 0 || tileX >= tileCount || tileY >= tileCount) continue;
-    const url = preset.url.replace('{z}', String(zoom)).replace('{x}', String(tileX)).replace('{y}', String(tileY));
-    requests.push(fetchElevationRaster(url, preset.encoding).then(raster => {
-      const geometry = terrainTileGeometry(raster, tileX, tileY, zoom, centreEcef, box);
-      root.add(new THREE.Mesh(geometry, material));
-    }));
+  const tiles = new Map<number, ElevationRaster>();
+  const requests: Promise<void>[] = [];
+  const left = Math.max(0, centreX - 1), right = Math.min(tileCount - 1, centreX + 1);
+  const top = Math.max(0, centreY - 1), bottom = Math.min(tileCount - 1, centreY + 1);
+  for (let y = top; y <= bottom; y++) for (let x = left; x <= right; x++) {
+    const url = preset.url.replace('{z}', String(zoom)).replace('{x}', String(x)).replace('{y}', String(y));
+    requests.push(fetchElevationRaster(url, preset.encoding).then(raster => { tiles.set(y * tileCount + x, raster); }));
   }
   await Promise.all(requests);
-  root.add(new THREE.HemisphereLight(0xffffff, 0x334455, 1.55)); root.updateMatrixWorld(true);
-  const radius = Math.max(1, box.getBoundingSphere(new THREE.Sphere()).radius);
-  const layer = new GeometryLayer(id, root, { source: new Source({ url: preset.url }) });
-  (layer as GeometryLayer & { update: () => void }).update = () => undefined;
-  await view.addLayer(layer);
+  const tileLatitude = (y: number) => THREE.MathUtils.radToDeg(Math.atan(Math.sinh(Math.PI * (1 - 2 * y / tileCount))));
+  const bounds = new Extent('EPSG:4326', left / tileCount * 360 - 180, (right + 1) / tileCount * 360 - 180,
+    tileLatitude(bottom + 1), tileLatitude(top));
+  const sampleTile = tiles.get(top * tileCount + left)!;
+  const columns = (right - left + 1) * sampleTile.width;
+  const rows = (bottom - top + 1) * sampleTile.height;
+  const layer = await addGlobeElevation(view, id, bounds, columns, rows, (lon, lat) => {
+    const x = (lon + 180) / 360 * tileCount;
+    const y = (1 - Math.asinh(Math.tan(THREE.MathUtils.degToRad(lat))) / Math.PI) / 2 * tileCount;
+    const tx = Math.floor(x), ty = Math.floor(y);
+    if (tx < left || tx > right || ty < top || ty > bottom) return 0;
+    const raster = tiles.get(ty * tileCount + tx);
+    if (!raster) return 0;
+    return raster.elevation[Math.floor((y - ty) * raster.height) * raster.width + Math.floor((x - tx) * raster.width)];
+  });
+  const corner = new Coordinates('EPSG:4326', bounds.west, bounds.north, 0).as('EPSG:4978').toVector3();
+  const opposite = new Coordinates('EPSG:4326', bounds.east, bounds.south, 0).as('EPSG:4978').toVector3();
+  const radius = Math.max(1, centreEcef.distanceTo(corner), centreEcef.distanceTo(opposite));
   return { id, name: preset.name, kind: 'remote', layer, attribution: preset.attribution, sourceCrs: 'EPSG:3857', center: centreEcef, radius, coverage: `3 × 3 tile patch · zoom ${zoom}` };
 }
 
@@ -114,7 +124,6 @@ export async function addLocalCogTerrain(view: GlobeView, buffer: ArrayBuffer, f
   const noData = noDataText === null ? undefined : Number(noDataText);
   const [west, south, east, north] = image.getBoundingBox();
   const valid = new Uint8Array(width * height);
-  const ecef: Array<THREE.Vector3 | undefined> = new Array(width * height);
   let min = Infinity; let max = -Infinity;
   const box = new THREE.Box3();
   for (let row = 0; row < height; row += 1) for (let column = 0; column < width; column += 1) {
@@ -124,40 +133,26 @@ export async function addLocalCogTerrain(view: GlobeView, buffer: ArrayBuffer, f
     const x = west + column / (width - 1) * (east - west);
     const y = north - row / (height - 1) * (north - south);
     const point = new Coordinates(sourceCrs, x, y, z).as('EPSG:4978').toVector3();
-    valid[index] = 1; ecef[index] = point; box.expandByPoint(point);
+    valid[index] = 1; box.expandByPoint(point);
     min = Math.min(min, z); max = Math.max(max, z);
   }
   if (box.isEmpty()) throw new Error('The GeoTIFF does not contain finite terrain samples.');
   const center = box.getCenter(new THREE.Vector3());
-  const positions = new Float32Array(width * height * 3);
-  const colours = new Float32Array(width * height * 3);
-  const colour = new THREE.Color();
-  let radius = 1;
-  for (let index = 0; index < ecef.length; index += 1) {
-    const point = ecef[index]; if (!point) continue;
-    const relative = point.clone().sub(center); radius = Math.max(radius, relative.length());
-    positions.set([relative.x, relative.y, relative.z], index * 3);
-    const normalized = max > min ? (Number(values[index]) - min) / (max - min) : 0.5;
-    colour.setHSL(0.28 - normalized * 0.2, 0.35, 0.27 + normalized * 0.28);
-    colours.set([colour.r, colour.g, colour.b], index * 3);
-  }
-  const indices: number[] = [];
-  for (let row = 0; row < height - 1; row += 1) for (let column = 0; column < width - 1; column += 1) {
-    const a = row * width + column; const b = a + 1; const c = a + width; const d = c + 1;
-    if (valid[a] && valid[b] && valid[c]) indices.push(a, c, b);
-    if (valid[b] && valid[c] && valid[d]) indices.push(b, c, d);
-  }
-  if (!indices.length) throw new Error('The GeoTIFF has no connected terrain cells after NoData filtering.');
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(colours, 3));
-  geometry.setIndex(indices); geometry.computeVertexNormals();
-  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0, side: THREE.DoubleSide }));
-  const root = new THREE.Group(); root.name = 'Local terrain'; root.position.copy(center); root.add(mesh, new THREE.HemisphereLight(0xffffff, 0x334455, 1.6)); root.updateMatrixWorld(true);
+  const radius = Math.max(1, box.getBoundingSphere(new THREE.Sphere()).radius);
+  const connected = valid.some((value, i) => i % width < width - 1 && i + width < valid.length &&
+    valid[i + 1] && valid[i + width] && (value || valid[i + width + 1]));
+  if (!connected) throw new Error('The GeoTIFF has no connected terrain cells after NoData filtering.');
+  const bounds = new Extent(sourceCrs, west, east, south, north).as('EPSG:4326');
+  const geographic = new Coordinates('EPSG:4326');
+  const projected = new Coordinates(sourceCrs);
   const id = `terrain-local-${Date.now()}`;
-  const layer = new GeometryLayer(id, root, { source: new Source({ url: 'local-cog' }) });
-  (layer as GeometryLayer & { update: () => void }).update = () => undefined;
-  await view.addLayer(layer);
+  const layer = await addGlobeElevation(view, id, bounds, width, height, (lon, lat) => {
+    geographic.setFromValues(lon, lat, 0).as(sourceCrs, projected);
+    const u = (projected.x - west) / (east - west), v = (north - projected.y) / (north - south);
+    if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
+    const index = Math.min(height - 1, Math.floor(v * height)) * width + Math.min(width - 1, Math.floor(u * width));
+    return valid[index] ? Number(values[index]) : 0;
+  });
   return { id, name: fileName, kind: 'local', layer, sourceCrs, elevationRange: [min, max], center, radius };
 }
 
@@ -173,7 +168,7 @@ interface ElevationRaster { width: number; height: number; elevation: Float32Arr
 async function fetchElevationRaster(url: string, encoding: TerrainEncoding): Promise<ElevationRaster> {
   const response = await fetch(url, { mode: 'cors' });
   if (!response.ok) throw new Error(`Terrain tile request failed with HTTP ${response.status}.`);
-  const bitmap = await createImageBitmap(await response.blob());
+  const bitmap = await createImageBitmap(await response.blob(), { colorSpaceConversion: 'none' });
   const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
   const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('The browser cannot decode terrain tiles.');
@@ -187,28 +182,40 @@ async function fetchElevationRaster(url: string, encoding: TerrainEncoding): Pro
   return { width: canvas.width, height: canvas.height, elevation };
 }
 
-function terrainTileGeometry(raster: ElevationRaster, tileX: number, tileY: number, zoom: number, origin: THREE.Vector3, bounds: THREE.Box3): THREE.BufferGeometry {
-  const segments = Math.max(1, Math.min(32, Math.max(raster.width - 1, raster.height - 1)));
-  const side = segments + 1; const positions = new Float32Array(side * side * 3); const colours = new Float32Array(side * side * 3);
-  const colour = new THREE.Color(); let min = Infinity; let max = -Infinity;
-  for (const value of raster.elevation) { min = Math.min(min, value); max = Math.max(max, value); }
-  const tileCount = 2 ** zoom;
-  for (let row = 0; row < side; row += 1) for (let column = 0; column < side; column += 1) {
-    const u = column / segments; const v = row / segments;
-    const sourceColumn = Math.round(u * (raster.width - 1)); const sourceRow = Math.round(v * (raster.height - 1));
-    const elevation = raster.elevation[sourceRow * raster.width + sourceColumn] ?? 0;
-    const longitude = (tileX + u) / tileCount * 360 - 180;
-    const mercatorY = Math.PI * (1 - 2 * (tileY + v) / tileCount);
-    const latitude = THREE.MathUtils.radToDeg(Math.atan(Math.sinh(mercatorY)));
-    const point = new Coordinates('EPSG:4326', longitude, latitude, elevation).as('EPSG:4978').toVector3(); bounds.expandByPoint(point);
-    const relative = point.sub(origin); const index = (row * side + column) * 3; positions.set([relative.x, relative.y, relative.z], index);
-    const normalized = max > min ? (elevation - min) / (max - min) : 0.5; colour.setHSL(0.3 - normalized * 0.18, 0.32, 0.28 + normalized * 0.25);
-    colours.set([colour.r, colour.g, colour.b], index);
-  }
-  const indices: number[] = [];
-  for (let row = 0; row < segments; row += 1) for (let column = 0; column < segments; column += 1) {
-    const a = row * side + column; const b = a + 1; const c = a + side; const d = c + 1; indices.push(a, c, b, b, c, d);
-  }
-  const geometry = new THREE.BufferGeometry(); geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(colours, 3)); geometry.setIndex(indices); geometry.computeVertexNormals(); return geometry;
+// GlobeView consumes elevation in its geographic tile matrix. Imagery is then
+// composited by the same globe material, including opacity and layer order.
+async function addGlobeElevation(view: GlobeView, id: string, bounds: Extent, columns: number, rows: number,
+  sample: (lon: number, lat: number) => number) {
+  const size = 64;
+  // Stop generating child textures once a geographic texel resolves a source pixel.
+  // Also resolve the footprint when a source contains only a handful of samples.
+  const pixelSpan = Math.min((bounds.east - bounds.west) / (columns + 2), (bounds.north - bounds.south) / (rows + 2));
+  const maxZoom = Math.max(0, Math.ceil(Math.log2(180 / (size * pixelSpan))));
+
+  const source = new TMSSource({
+    crs: 'EPSG:4326', url: 'memory://terrain/${z}/${x}/${y}', extent: bounds, zoom: { min: 0, max: maxZoom },
+    fetcher: async () => undefined,
+    parser: (_: unknown, { extent }: { extent: { toExtent(crs: string): Extent } }) => {
+      const tile = extent.toExtent('EPSG:4326');
+      const data = new Float32Array(size * size);
+      for (let y = 0; y < size; y++) {
+        const lat = tile.north - (y + 0.5) / size * (tile.north - tile.south);
+        if (lat < bounds.south || lat > bounds.north) continue;
+        for (let x = 0; x < size; x++) {
+          const lon = tile.west + (x + 0.5) / size * (tile.east - tile.west);
+          if (lon >= bounds.west && lon <= bounds.east) data[y * size + x] = sample(lon, lat);
+        }
+      }
+      const texture = new THREE.DataTexture(data, size, size, THREE.RedFormat, THREE.FloatType);
+      texture.needsUpdate = true;
+      return Object.assign(texture, { extent });
+    },
+  });
+  // A custom parser normally signals vector features to iTowns. These are raster tiles.
+  source.isVectorSource = false;
+  source.extentInsideLimit = (extent: Extent, zoom: number) => zoom <= maxZoom && bounds.intersectsExtent(extent);
+  const options = { source, extent: bounds, noDataValue: undefined };
+  const layer = new ElevationLayer(id, options) as TerrainRecord['layer'];
+  await view.addLayer(layer);
+  return layer;
 }

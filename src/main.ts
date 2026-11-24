@@ -420,7 +420,7 @@ async function loadLocalTerrain(file: File): Promise<void> {
   setStatus(`Loading terrain ${file.name}…`, 'working'); setLoading(file.name, 'Reading local terrain…', 5);
   try {
     const buffer = await readFileBuffer(file); setLoading(file.name, 'Decoding and resampling COG…', 48); await nextPaint();
-    const next = await addLocalCogTerrain(view, buffer, file.name); setLoading(file.name, 'Adding terrain mesh…', 90);
+    const next = await addLocalCogTerrain(view, buffer, file.name); setLoading(file.name, 'Applying terrain elevations…', 90);
     replaceTerrain(next); setStatus(`${file.name} terrain added. Buildings remain at their supplied Z.`, 'success');
   } catch (error) { setStatus(error instanceof Error ? error.message : 'The terrain could not be loaded.', 'error'); }
   finally { hideLoading(); }
@@ -878,11 +878,11 @@ function renderTerrainCatalog(): void {
 }
 
 function terrainLayerVisible(record: TerrainRecord): boolean {
-  return (record.layer as typeof record.layer & { visible?: boolean }).visible ?? true;
+  return record.layer.scale !== 0;
 }
 
 function setTerrainLayerVisible(record: TerrainRecord, visible: boolean): void {
-  (record.layer as typeof record.layer & { visible: boolean }).visible = visible;
+  record.layer.scale = visible ? 1 : 0;
 }
 
 function handlePointerMove(event: PointerEvent): void {
